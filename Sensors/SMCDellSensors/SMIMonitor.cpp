@@ -411,7 +411,7 @@ bool SMIMonitor::findFanSensors() {
 			state.fanInfo[fanCount].maxSpeed = i8k_get_fan_nominal_speed(i, I8K_FAN_HIGH);
 			rc = i8k_get_fan_speed(i, true);
 			if (rc >= 0)
-				state.fanInfo[i].speed = rc;
+				state.fanInfo[fanCount].speed = rc;
 
 			int type = i8k_get_fan_type(i);
 			if ((type > FanInfo::Unsupported) && (type < FanInfo::Last))
@@ -443,7 +443,7 @@ bool SMIMonitor::findTempSensors() {
 			state.tempInfo[tempCount].index = i;
 			int type = i8k_get_temp_type(i);
 			state.tempInfo[tempCount].type = static_cast<TempInfo::SMMTempSensorType>(type);
-			state.tempInfo[i].temp = rc;
+			state.tempInfo[tempCount].temp = rc;
 			DBGLOG("sdell", "Temp sensor %d has been detected, type %d, temp = %d", i, state.tempInfo[tempCount].type, rc);
 			tempCount++;
 		}

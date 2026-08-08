@@ -124,6 +124,8 @@ bool BatteryManager::findBatteries() {
 	if (iterator) {
 		while (auto entry = iterator->getNextObject()) {
 			if (entry->compareName(pnp)) {
+				if (batteriesCount >= BatteryManagerState::MaxBatteriesSupported)
+					break;
 				auto device = OSDynamicCast(IOACPIPlatformDevice, entry);
 				if (device) {
 					DBGLOG("bmgr", "found ACPI PNP battery %s", safeString(entry->getName()));
@@ -136,8 +138,6 @@ bool BatteryManager::findBatteries() {
 					}
 
 					batteriesCount++;
-					if (batteriesCount >= BatteryManagerState::MaxBatteriesSupported)
-						break;
 				}
 			}
 		}
@@ -158,6 +158,8 @@ bool BatteryManager::findACAdapters() {
 	if (iterator) {
 		while (auto entry = iterator->getNextObject()) {
 			if (entry->compareName(pnp)) {
+				if (adapterCount >= BatteryManagerState::MaxAcAdaptersSupported)
+					break;
 				auto device = OSDynamicCast(IOACPIPlatformDevice, entry);
 				if (device) {
 					DBGLOG("bmgr", "found ACPI PNP adapter %s", safeString(entry->getName()));
@@ -170,8 +172,6 @@ bool BatteryManager::findACAdapters() {
 					}
 
 					adapterCount++;
-					if (adapterCount >= BatteryManagerState::MaxAcAdaptersSupported)
-						break;
 				}
 			}
 		}

@@ -3389,6 +3389,8 @@ SuperIODevice *createDeviceITE(uint16_t deviceId) {
 	if (device) return device;
 	device = Device_0x8628::createDevice(deviceId);
 	if (device) return device;
+	device = Device_0x8638::createDevice(deviceId);
+	if (device) return device;
 	device = Device_0x8686::createDevice(deviceId);
 	if (device) return device;
 	device = Device_0x8728::createDevice(deviceId);

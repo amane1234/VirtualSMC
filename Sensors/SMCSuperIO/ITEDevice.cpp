@@ -7,6 +7,8 @@
 //  @author joedm.
 //
 
+#include <IOKit/IOLib.h>
+
 #include "ITEDevice.hpp"
 #include "SMCSuperIO.hpp"
 #include "Devices.hpp"
@@ -173,22 +175,22 @@ namespace ITE {
 		return a * (1.0 - f) + (b * f);
 	}
 
+	// Returns UINT16_MAX (and leaves *found untouched if provided) when the curve for
+	// this fan has no valid points at all, instead of reading past the ends of the array.
 	uint16_t getCurveMin(uint8_t index) {
-		int i;
-		for (i = 0; i <= 255; ++i) {
+		for (int i = 0; i <= 255; ++i) {
 			if (_pwmCurve[index][i] != UINT16_MAX)
-				break;
+				return _pwmCurve[index][i];
 		}
-		return _pwmCurve[index][i];;
+		return 0;
 	}
 
 	uint16_t getCurveMax(uint8_t index) {
-		int i;
-		for (i = 255; i >= 0; --i) {
+		for (int i = 255; i >= 0; --i) {
 			if (_pwmCurve[index][i] != UINT16_MAX)
-				break;
+				return _pwmCurve[index][i];
 		}
-		return _pwmCurve[index][i];;
+		return 0;
 	}
 
 	// probably could do this better
@@ -199,13 +201,22 @@ namespace ITE {
 		if (_pwmCurve[index][i] >= rpm)
 			return i;
 	  }
-	  return getCurveValue(index, getCurveMax(index));
+	  // No configured point covers the requested rpm (or the curve is empty). Find the
+	  // highest configured pwm index directly rather than recursing through getCurveMax,
+	  // which would recurse forever if the curve has no valid points at all.
+	  for (int i = 255; i >= 0; --i) {
+		  if (_pwmCurve[index][i] != UINT16_MAX)
+			  return i;
+	  }
+	  return 255;
 	}
 
-	void curveFromStr(uint8_t index, char* str) {
+	// Returns true if at least one valid (rpm, pwm) point was parsed from str.
+	bool curveFromStr(uint8_t index, char* str) {
 		char *ptr, *split, *rpmS, *pwmS;
 		uint8_t pwm;
 		uint16_t rpm;
+		bool foundPoint = false;
 
 		while (true) {
 			split = strsep(&str, "|");
@@ -224,7 +235,10 @@ namespace ITE {
 			pwm = strtoul(pwmS, &ptr, 10);
 
 			_pwmCurve[index][pwm] = rpm;
+			foundPoint = true;
 		}
+
+		return foundPoint;
 	}
 
 	void computeCurve(uint8_t index) {
@@ -278,7 +292,7 @@ namespace ITE {
 
 			// Set control index
 			snprintf(name, sizeof(name), "fan%u-control", index);
-			if (WIOKit::getOSDataValue<uint8_t>(lpc, name, tmp) && tmp <= getTachometerCount())
+			if (WIOKit::getOSDataValue<uint8_t>(lpc, name, tmp) && tmp < getTachometerCount())
 				_fanControlIndex[index] = tmp;
 			else
 				_fanControlIndex[index] = index;
@@ -291,10 +305,28 @@ namespace ITE {
 			auto nameP = lpc->getProperty(name);
 			auto nameData = OSDynamicCast(OSData, nameP);
 
+			bool haveCurve = false;
 			if (nameData) {
-				nameVal = STRDUP(static_cast<const char *>(nameData->getBytesNoCopy()), nameData->getLength());
-				curveFromStr(index, nameVal);
-			} else {
+				// getBytesNoCopy() is raw property data and is not guaranteed to be
+				// NUL-terminated. STRDUP() relies on strlen() internally, which would
+				// walk past the end of the buffer looking for a terminator that might
+				// not be there. Copy the known length into an explicitly NUL-terminated
+				// buffer instead.
+				auto len = nameData->getLength();
+				nameVal = static_cast<char *>(IOMalloc(len + 1));
+				if (nameVal) {
+					memcpy(nameVal, nameData->getBytesNoCopy(), len);
+					nameVal[len] = '\0';
+					haveCurve = curveFromStr(index, nameVal);
+					IOFree(nameVal, len + 1);
+					nameVal = nullptr;
+				}
+			}
+
+			// Fall back to the default curve whenever the property is absent, empty,
+			// or fails to parse into any valid point — an empty curve makes
+			// getCurveValue() unable to terminate without a defined fallback point.
+			if (!haveCurve) {
 				_pwmCurve[index][0] = 0;
 				_pwmCurve[index][255] = 3315;
 			}

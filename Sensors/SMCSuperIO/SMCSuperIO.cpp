@@ -155,9 +155,14 @@ SuperIODevice* SMCSuperIO::detectDevice() {
 				lilu_strlcpy(deviceNameEC, nameStr->getCStringNoCopy(), sizeof(deviceNameEC));
 				DBGLOG("ssio", "found EC device %s from string", deviceNameEC);
 			} else if (nameData) {
+				// getBytesNoCopy() is raw property data and is not guaranteed to be
+				// NUL-terminated. strlcpy's internal strlen() would read past the end
+				// of the buffer looking for a terminator; copy the known length
+				// explicitly and terminate ourselves instead.
 				auto s = nameData->getLength();
-				if (s > sizeof(deviceNameEC)) s = sizeof(deviceNameEC);
-				lilu_strlcpy(deviceNameEC, static_cast<const char *>(nameData->getBytesNoCopy()), s);
+				if (s > sizeof(deviceNameEC) - 1) s = sizeof(deviceNameEC) - 1;
+				memcpy(deviceNameEC, nameData->getBytesNoCopy(), s);
+				deviceNameEC[s] = '\0';
 				DBGLOG("ssio", "found EC device %s from data", deviceNameEC);
 			}
 		}
