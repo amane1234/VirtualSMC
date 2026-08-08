@@ -48,7 +48,7 @@ bool ACPIBattery::getBatteryInfo(BatteryInfo &bi, bool extended) {
 
 	OSArray *info = OSDynamicCast(OSArray, object);
 	if (!info) {
-		object->release();
+		OSSafeReleaseNULL(object);
 		return false;
 	}
 
@@ -156,7 +156,7 @@ bool ACPIBattery::getBatteryInfo(BatteryInfo &bi, bool extended) {
 						bi.state.publishTemperatureKey = true;
 				}
 			}
-			supplement->release();
+			OSSafeReleaseNULL(supplement);
 		}
 	}
 	DBGLOG("acpib", "supplement config %x", supplementConfig);
@@ -194,7 +194,7 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 		batteryInfo->state.lastRemainingCapacity = batteryInfo->state.remainingCapacity;
 		IOSimpleLockUnlock(batteryInfoLock);
 		SYSLOG("acpib", "error in ACPI data");
-		acpi->release();
+		OSSafeReleaseNULL(acpi);
 		return false;
 	}
 

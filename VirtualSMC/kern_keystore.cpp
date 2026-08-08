@@ -161,7 +161,24 @@ IOReturn VirtualSMCKeystore::loadPlugin(VirtualSMCAPI::Plugin *plugin) {
 		return kIOReturnInvalid;
 	}
 
-	IOReturn code = kIOReturnSuccess;
+	// Reserve a plugin slot before erasing anything from plugin->data/dataHidden.
+	// The Plugin struct contract promises it stays unchanged and undeallocated
+	// unless this call succeeds, so a full plugin table (the realistic failure
+	// mode here) must not touch the caller's storage at all.
+	IOReturn code = kIOReturnNoSpace;
+	for (size_t i = 0; i < VirtualSMCAPI::PluginMax; i++) {
+		VirtualSMCAPI::Plugin * nullData = nullptr;
+		if (atomic_compare_exchange_strong_explicit(&pluginData[i], &nullData, plugin, memory_order_relaxed, memory_order_relaxed)) {
+			code = kIOReturnSuccess;
+			break;
+		}
+	}
+
+	if (code != kIOReturnSuccess) {
+		SYSLOG("kstore", "no free plugin slots for %s", plugin->product);
+		return code;
+	}
+
 	VirtualSMCAPI::KeyStorage ovrData[2];
 	VirtualSMCAPI::KeyStorage *pData[2] {&plugin->data, &plugin->dataHidden};
 	VirtualSMCAPI::KeyStorage *sData[2] {&dataStorage, &dataHiddenStorage};
@@ -186,46 +203,48 @@ IOReturn VirtualSMCKeystore::loadPlugin(VirtualSMCAPI::Plugin *plugin) {
 	}
 
 	if (code == kIOReturnSuccess) {
-		code = kIOReturnNoSpace;
-		for (size_t i = 0; i < VirtualSMCAPI::PluginMax; i++) {
-			VirtualSMCAPI::Plugin * nullData = nullptr;
-			if (atomic_compare_exchange_strong_explicit(&pluginData[i], &nullData, plugin, memory_order_relaxed, memory_order_relaxed)) {
-				code = kIOReturnSuccess;
-				break;
-			}
-		}
-
-		if (code == kIOReturnSuccess) {
-			for (size_t i = 0; code == kIOReturnSuccess && i < arrsize(ovrData); i++) {
-				auto &currOData = ovrData[i];
-				auto &currSData = *sData[i];
-				for (size_t j = 0; j < currOData.size(); j++) {
-					VirtualSMCKeyValue *tVal = nullptr;
-					if (getByName(currSData, currOData[j].key, tVal) == SmcSuccess) {
-						// Obtain any current value (we will check if it changed later).
-						VirtualSMCValue *orgValue = atomic_load_explicit(&tVal->value, memory_order_relaxed);
-						// Overwrite it with the new value.
-						atomic_store_explicit(&tVal->value, currOData[j].value, memory_order_relaxed);
-						// Protect the replaced value from deletion (there are no data races here).
-						atomic_store_explicit(&currOData[j].value, nullptr, memory_order_relaxed);
-						// Synchronise access by checking for any extra overrides.
-						// Note, a pointer could be lost in the first load & store pair due to a race-condition.
-						// However, this is fine, because that is a contract violation which must lead to a kernel panic.
-						VirtualSMCValue *nullValue = nullptr;
-						if (!atomic_compare_exchange_strong_explicit(&currOData[j].backup, &nullValue, orgValue,
-																	 memory_order_relaxed, memory_order_relaxed))
-							PANIC("kstore", "attempt to override twice [%08X] by %s", currOData[j].key, plugin->product);
-					} else {
-						code = kIOReturnInvalid;
-						break;
-					}
+		for (size_t i = 0; code == kIOReturnSuccess && i < arrsize(ovrData); i++) {
+			auto &currOData = ovrData[i];
+			auto &currSData = *sData[i];
+			for (size_t j = 0; j < currOData.size(); j++) {
+				VirtualSMCKeyValue *tVal = nullptr;
+				if (getByName(currSData, currOData[j].key, tVal) == SmcSuccess) {
+					// Obtain any current value (we will check if it changed later).
+					VirtualSMCValue *orgValue = atomic_load_explicit(&tVal->value, memory_order_relaxed);
+					// Overwrite it with the new value.
+					atomic_store_explicit(&tVal->value, currOData[j].value, memory_order_relaxed);
+					// Protect the replaced value from deletion (there are no data races here).
+					atomic_store_explicit(&currOData[j].value, nullptr, memory_order_relaxed);
+					// Synchronise access by checking for any extra overrides.
+					// Note, a pointer could be lost in the first load & store pair due to a race-condition.
+					// However, this is fine, because that is a contract violation which must lead to a kernel panic.
+					VirtualSMCValue *nullValue = nullptr;
+					if (!atomic_compare_exchange_strong_explicit(&currOData[j].backup, &nullValue, orgValue,
+																 memory_order_relaxed, memory_order_relaxed))
+						PANIC("kstore", "attempt to override twice [%08X] by %s", currOData[j].key, plugin->product);
+				} else {
+					code = kIOReturnInvalid;
+					break;
 				}
 			}
 		}
 	}
 
-	for (auto &entry : ovrData)
-		entry.deinit();
+	if (code == kIOReturnSuccess) {
+		for (auto &entry : ovrData)
+			entry.deinit();
+	} else {
+		// Release the reserved slot. Entries still held in ovrData at this point
+		// were already erased from the plugin's own storage above (an allocation
+		// failure or, defensively, a storage mismatch that should never happen in
+		// practice); intentionally leak rather than free them here, since the
+		// submitting plugin may still hold references into the values it owns.
+		for (size_t i = 0; i < VirtualSMCAPI::PluginMax; i++) {
+			VirtualSMCAPI::Plugin *expected = plugin;
+			if (atomic_compare_exchange_strong_explicit(&pluginData[i], &expected, nullptr, memory_order_relaxed, memory_order_relaxed))
+				break;
+		}
+	}
 
 	return code;
 }
@@ -668,9 +687,6 @@ SMC_RESULT VirtualSMCKeystore::getByName(SMC_KEY name, VirtualSMCKeyValue *&val,
 		}
 	}
 
-	if (valueKPST)
-		static_cast<VirtualSMCValueKPST *>(valueKPST)->setUnlocked(false);
-
 	return r;
 }
 
@@ -750,12 +766,18 @@ SMC_RESULT VirtualSMCKeystore::readValueByName(SMC_KEY key, const VirtualSMCValu
 		if (!(currval->attr & SMC_KEY_ATTRIBUTE_READ))
 			return SmcNotReadable;
 		
-		// Check if privately readable
-		if (currval->attr & SMC_KEY_ATTRIBUTE_PRIVATE_READ &&
-			(!static_cast<VirtualSMCValueKPST *>(valueKPST)->unlocked() ||
-			 OSSwapInt32(*reinterpret_cast<uint32_t *>(valueEPCI->data) & 0xFF00) == 0xF000))
-		return SmcNotReadable;
-		
+		// Check if privately readable. Unlocked state (from a prior KeyKPPW
+		// write) grants exactly one privileged access, so it must be consumed
+		// here rather than by the getByName() lookup above, which would clear
+		// it before this very check gets to observe it.
+		if (currval->attr & SMC_KEY_ATTRIBUTE_PRIVATE_READ) {
+			bool wasUnlocked = static_cast<VirtualSMCValueKPST *>(valueKPST)->unlocked();
+			static_cast<VirtualSMCValueKPST *>(valueKPST)->setUnlocked(false);
+			if (!wasUnlocked ||
+				OSSwapInt32(*reinterpret_cast<uint32_t *>(valueEPCI->data) & 0xFF00) == 0xF000)
+				return SmcNotReadable;
+		}
+
 		// Update internal buffers
 		res = currval->readAccess();
 		if (res == SmcSuccess)
@@ -765,7 +787,7 @@ SMC_RESULT VirtualSMCKeystore::readValueByName(SMC_KEY key, const VirtualSMCValu
 					reinterpret_cast<char *>(&key)[0], reinterpret_cast<char *>(&key)[1],
 					reinterpret_cast<char *>(&key)[2], reinterpret_cast<char *>(&key)[3]);
 	}
-	
+
 	return res;
 }
 
@@ -793,12 +815,18 @@ SMC_RESULT VirtualSMCKeystore::writeValueByName(SMC_KEY key, const SMC_DATA *dat
 		if (!(currval->attr & SMC_KEY_ATTRIBUTE_WRITE))
 			return SmcNotWritable;
 		
-		// Check if privately writable
-		if (currval->attr & SMC_KEY_ATTRIBUTE_PRIVATE_WRITE &&
-			(!static_cast<VirtualSMCValueKPST *>(valueKPST)->unlocked() ||
-			 OSSwapInt32(*reinterpret_cast<uint32_t *>(valueEPCI->data) & 0xFF00) == 0xF000))
-			return SmcNotReadable;
-		
+		// Check if privately writable. Unlocked state (from a prior KeyKPPW
+		// write) grants exactly one privileged access, so it must be consumed
+		// here rather than by the getByName() lookup above, which would clear
+		// it before this very check gets to observe it.
+		if (currval->attr & SMC_KEY_ATTRIBUTE_PRIVATE_WRITE) {
+			bool wasUnlocked = static_cast<VirtualSMCValueKPST *>(valueKPST)->unlocked();
+			static_cast<VirtualSMCValueKPST *>(valueKPST)->setUnlocked(false);
+			if (!wasUnlocked ||
+				OSSwapInt32(*reinterpret_cast<uint32_t *>(valueEPCI->data) & 0xFF00) == 0xF000)
+				return SmcNotWritable;
+		}
+
 		// Update internal buffers
 		res = currval->writeAccess();
 		if (res == SmcSuccess) {
@@ -827,10 +855,16 @@ SMC_RESULT VirtualSMCKeystore::getInfoByName(SMC_KEY key, SMC_DATA_SIZE &size, S
 		attr = currval->attr & ~SMC_KEY_ATTRIBUTE_CONST;
 
 		bool epciStrip = OSSwapInt32(*reinterpret_cast<uint32_t *>(valueEPCI->data) & 0xFF00) == 0xF000;
-		if ((attr & SMC_KEY_ATTRIBUTE_PRIVATE_READ) && epciStrip && !static_cast<VirtualSMCValueKPST *>(valueKPST)->unlocked())
-			attr &= ~SMC_KEY_ATTRIBUTE_READ;
-		if ((attr & SMC_KEY_ATTRIBUTE_PRIVATE_WRITE) && epciStrip && !static_cast<VirtualSMCValueKPST *>(valueKPST)->unlocked())
-			attr &= ~SMC_KEY_ATTRIBUTE_WRITE;
+		if (attr & (SMC_KEY_ATTRIBUTE_PRIVATE_READ|SMC_KEY_ATTRIBUTE_PRIVATE_WRITE)) {
+			// Consume the one-shot unlock here (see readValueByName/writeValueByName)
+			// rather than relying on the getByName() lookup above to clear it.
+			bool wasUnlocked = static_cast<VirtualSMCValueKPST *>(valueKPST)->unlocked();
+			static_cast<VirtualSMCValueKPST *>(valueKPST)->setUnlocked(false);
+			if ((attr & SMC_KEY_ATTRIBUTE_PRIVATE_READ) && epciStrip && !wasUnlocked)
+				attr &= ~SMC_KEY_ATTRIBUTE_READ;
+			if ((attr & SMC_KEY_ATTRIBUTE_PRIVATE_WRITE) && epciStrip && !wasUnlocked)
+				attr &= ~SMC_KEY_ATTRIBUTE_WRITE;
+		}
 	} else {
 		SYSLOG_COND(reportMissingKeys || ADDPR(debugEnabled), "kstore", "key [%c%c%c%c] not found for info",
 					reinterpret_cast<char *>(&key)[0], reinterpret_cast<char *>(&key)[1],
