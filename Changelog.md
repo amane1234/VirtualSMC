@@ -1,5 +1,11 @@
 VirtualSMC Changelog
 ====================
+#### v1.3.9
+- Fixed loadPlugin() freeing/losing key entries it had already erased from a plugin's own storage on failure (e.g. a full plugin table), which could corrupt any sensor plugin's key data on load
+- Fixed the private-key unlock gate (KeyKPPW/KeyKPST) being permanently non-functional since the initial 2018 commit due to the unlock flag being cleared before its own consumer got to check it
+- Fixed a null-pointer dereference in SMCBatteryManager's ACPI battery status/info handling when evaluateObject() reports success with a null object
+- Fixed an out-of-bounds heap read when copying a non-NUL-terminated hardware model name from a ModelInfo/OverrideModelInfo plist entry
+
 #### v1.3.8
 - Reduced unneeded power source notifications to remove repeated "PMRD: clamshell closed 0, disabled 0/0, desktopMode 0, ac 0" messages in kernel log
 - Fixed freezing of battery percentage when the battery is 100% charged initially but the system is connected to an insufficiently powerful AC adapter
