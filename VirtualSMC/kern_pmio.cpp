@@ -44,8 +44,11 @@ void SMCProtocolPMIO::loadValueInBuffer() {
 		currentResult = SmcKeySizeMismatch;
 	}
 	
-	dataSize = currentSize;
-	bzero(dataBuffer, dataSize > SMC_MAX_DATA_SIZE ? SMC_MAX_DATA_SIZE : dataSize);
+	// currentSize is attacker-controlled (caller-declared KeyValue.size, up to 255),
+	// but dataBuffer is only SMC_MAX_DATA_SIZE bytes. Clamp before storing it in the
+	// dataSize member, otherwise readData() will read past the end of dataBuffer.
+	dataSize = currentSize > SMC_MAX_DATA_SIZE ? SMC_MAX_DATA_SIZE : currentSize;
+	bzero(dataBuffer, dataSize);
 }
 
 void SMCProtocolPMIO::loadKeyInBuffer() {

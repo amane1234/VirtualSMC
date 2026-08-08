@@ -105,7 +105,7 @@ void SMCProtocolMMIO::setInterrupt(SMC_EVENT_CODE code, const void *data, size_t
 	//TODO: Actually reverse AppleSMC::smcHandleInterruptEvent
 	if (code == SmcEventLogMessage) {
 		if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) == KERN_SUCCESS) {
-			auto writtenSize = size > SMC_MAX_LOG_SIZE ? SMC_MAX_DATA_SIZE : size;
+			auto writtenSize = size > SMC_MAX_LOG_SIZE ? SMC_MAX_LOG_SIZE : size;
 			lilu_os_memcpy(mmioPtr<SMC_LOG, SMC_MMIO_READ_LOG>(), data, writtenSize);
 			if (writtenSize < SMC_MAX_LOG_SIZE)
 				bzero(mmioPtr<SMC_LOG, SMC_MMIO_READ_LOG>() + writtenSize, SMC_MAX_LOG_SIZE-writtenSize);

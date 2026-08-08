@@ -13,6 +13,7 @@
 #define sens_cpu_hpp
 
 #include <IOKit/IOService.h>
+#include <stdatomic.h>
 
 #include <Headers/kern_util.hpp>
 #include <Headers/kern_cpu.hpp>
@@ -217,7 +218,16 @@ class EXPORT SMCProcessor : public IOService {
 	 *  Array of thread' handles used to update cpu specific counters
 	 */
 	thread_call_t threadHandles[CPUInfo::MaxCpus] {};
-	
+
+	/**
+	 *  Signals per-CPU worker threads (which otherwise loop forever) to exit.
+	 *  Only ever set when unwinding a partially initialised start(), so that
+	 *  thread_call_free() can succeed instead of spinning against a thread
+	 *  that never returns (which would hang the caller and leave the worker
+	 *  dereferencing a freed SMCProcessor on start() failure).
+	 */
+	atomic_bool stopWorkers;
+
 	/**
 	 *  Helper function to bind current thread to specified CPU
 	 */

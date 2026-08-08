@@ -261,7 +261,10 @@ bool VirtualSMCKeystore::deserialize(const uint8_t *src, uint32_t size) {
 	src += sizeof(SerializedDataHeader);
 	size -= sizeof(SerializedDataHeader);
 	
-	for (uint32_t i = 0; i < size; i++) {
+	// deserialize() consumes from (src, size) by reference, shrinking size by the
+	// actual bytes used per entry; looping on `i < size` conflated an entry count
+	// with a remaining-byte count. Loop until all bytes are consumed instead.
+	for (uint32_t i = 0; size > 0; i++) {
 		SMC_KEY name;
 		SMC_DATA data[SMC_MAX_DATA_SIZE];
 		SMC_DATA_SIZE dataSize;

@@ -129,7 +129,7 @@ void SMCProcessor::staticThreadEntry(thread_call_param_t param0, thread_call_par
 	ml_set_interrupts_enabled(enable);
 #endif
 	
-	while (true) {
+	while (!atomic_load_explicit(&that->stopWorkers, memory_order_relaxed)) {
 		IOSleep(TimerTimeoutMs);
 		that->updateCounters(cpu);
 	}
@@ -357,6 +357,8 @@ bool SMCProcessor::start(IOService *provider) {
 
 	DBGLOG("scpu", "obtained generation %d %X:%X:%X", cpuGeneration, cpuFamily, cpuModel, cpuStepping);
 
+	atomic_init(&stopWorkers, false);
+
 	// Prepare time sources and event loops
 	bool success = true;
 	counterLock = IOSimpleLockAlloc();
@@ -385,16 +387,18 @@ bool SMCProcessor::start(IOService *provider) {
 			static_cast<SMCProcessor *>(cpu)->readTjmax();
 		}, this);
 
-		if (counters.tjmax[0] == 0) {
-			SYSLOG("scpu", "tjmax temperature is 0, fallback to predefined");
-			// Cannot find this bit in Intel Software Developer manual
-			if (cpuGeneration == CPUInfo::CpuGeneration::Penryn && (rdmsr64(MSR_IA32_PLATFORM_ID) & 0x10000000))
-				counters.tjmax[0] = 105;
-			else
-				counters.tjmax[0] = 100;
+		// Cannot find this bit in Intel Software Developer manual
+		uint8_t fallbackTjmax = (cpuGeneration == CPUInfo::CpuGeneration::Penryn &&
+			(rdmsr64(MSR_IA32_PLATFORM_ID) & 0x10000000)) ? 105 : 100;
 
-			for (uint8_t i = 1; i < cpuTopology.packageCount; i++)
-				counters.tjmax[i] = counters.tjmax[0];
+		// Check every package individually — a package other than 0 failing to read
+		// MSR_TEMPERATURE_TARGET must not be left at tjmax 0 (which would make later
+		// temperature - tjmax computations underflow to garbage).
+		for (uint8_t i = 0; i < cpuTopology.packageCount; i++) {
+			if (counters.tjmax[i] == 0) {
+				SYSLOG("scpu", "tjmax temperature for package %u is 0, fallback to predefined", i);
+				counters.tjmax[i] = fallbackTjmax;
+			}
 		}
 	}
 
@@ -414,11 +418,18 @@ bool SMCProcessor::start(IOService *provider) {
 	}
 	
 	if (!success) {
+		// Worker threads already dispatched above (staticThreadEntry) loop forever on
+		// their own kernel thread until told to stop. Signal them before trying to free
+		// their thread_call handles below, otherwise thread_call_free() can never
+		// succeed (the call is permanently "active") and the loop underneath spins
+		// forever while the orphaned workers keep dereferencing this freed instance.
+		atomic_store_explicit(&stopWorkers, true, memory_order_relaxed);
+
 		if (counterLock) {
 			IOSimpleLockFree(counterLock);
 			counterLock = nullptr;
 		}
-		for (uint8_t cpu=0; cpu < cpuTopology.totalLogical(); ++cpu) {
+		for (uint32_t cpu=0; cpu < cpuTopology.totalLogical(); ++cpu) {
 			while (threadHandles[cpu] && !thread_call_free(threadHandles[cpu]))
 				thread_call_cancel(threadHandles[cpu]);
 			threadHandles[cpu] = nullptr;
