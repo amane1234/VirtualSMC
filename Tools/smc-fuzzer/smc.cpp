@@ -372,9 +372,11 @@ int main(int argc, char *argv[]) {
       if (op != OP_FUZZ)
         op = OP_WRITE;
       val.dataSize = 0;
-      if (strlen(optarg) % 2 != 0)
+      if (strlen(optarg) / 2 + (strlen(optarg) % 2) > sizeof(val.bytes))
+        fprintf(stderr, "warning: -w value truncated to %zu bytes\n", sizeof(val.bytes));
+      if (strlen(optarg) % 2 != 0 && val.dataSize < sizeof(val.bytes))
         sscanf(optarg++, "%1hhx", reinterpret_cast<unsigned char *>(&val.bytes[val.dataSize++]));
-      for (size_t i = 0, len = strlen(optarg)/2; i < len; i++, optarg += 2)
+      for (size_t i = 0, len = strlen(optarg)/2; i < len && val.dataSize < sizeof(val.bytes); i++, optarg += 2)
         sscanf(optarg, "%2hhx", reinterpret_cast<unsigned char *>(&val.bytes[val.dataSize++]));
       break;
     case 'h':

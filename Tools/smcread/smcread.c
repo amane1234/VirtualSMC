@@ -200,6 +200,13 @@ static const char *getAttr(uint8_t attr) {
 	return attrbuf;
 }
 
+// Sanity bound on the addr/numb fields parsed from an untrusted .smc update file.
+// Real SMC firmware images are at most a few hundred KB; this cap exists purely to
+// stop size_t overflow in `addr + numb` / `addr + extra` below, which could otherwise
+// wrap around, defeat the `cursz < addr + numb` bounds check, and cause a heap
+// out-of-bounds write driven entirely by the file's declared address/length.
+static const size_t kMaxUpdateFileSize = 64u * 1024u * 1024u; // 64 MiB
+
 static uint8_t *convertUpdate(char *buf, size_t *sz, char revrecover[64]) {
 	uint8_t *bin = NULL;
 	size_t cursz = 0;
@@ -222,7 +229,7 @@ static uint8_t *convertUpdate(char *buf, size_t *sz, char revrecover[64]) {
 						j += 2;
 						char *end = NULL;
 						addr = strtoul(&line[j], &end, 16);
-						if (end) j += end - &line[j] - 1;
+						if (end && addr <= kMaxUpdateFileSize) j += end - &line[j] - 1;
 						else     break;
 					} else if (line[j] != '+') {
 						break;
@@ -231,7 +238,8 @@ static uint8_t *convertUpdate(char *buf, size_t *sz, char revrecover[64]) {
 					j++;
 					char *end = NULL;
 					numb = strtoul(&line[j], &end, 10);
-					if (end && numb > 0) j += end - &line[j];
+					if (end && numb > 0 && numb <= kMaxUpdateFileSize && addr <= kMaxUpdateFileSize - numb)
+						j += end - &line[j];
 					else break;
 				} else if (numb > 0) {
 					// Fill the gaps with 0xFF
@@ -357,8 +365,12 @@ static uint8_t smc_read_key(io_connect_t con, SMCKeyName key, SMCKeyInfo *info, 
 	
 	kern_return_t result = IOConnectCallStructMethod(con, KERNEL_INDEX_SMC, &input, sizeof(input), &output, &output_sz);
 	if (result == kIOReturnSuccess) {
+		// dataSize is reported by the kernel driver and is not validated against the
+		// fixed 32-byte `data` output buffer; callers index data[0..dataSize) directly.
+		if (output.keyInfo.dataSize > 32)
+			output.keyInfo.dataSize = 32;
 		if (info) *info = output.keyInfo;
-		
+
 		input.keyInfo.dataSize = output.keyInfo.dataSize;
 		input.data8 = SMC_CMD_READ_BYTES;
 		output_sz = sizeof(output);
@@ -526,10 +538,19 @@ static int smc_dump_lib_keys(const char *smcpath) {
 
 			uint8_t *start = (uint8_t *)dlsym(smc_lib, "SMCReadKey");
 			uint8_t *ptr = start;
+			// Bound the brute-force scan: if the pattern is never found (e.g. a
+			// different/patched libSMC.dylib via -l), this used to walk off the
+			// mapped region and segfault instead of failing gracefully.
+			static const ptrdiff_t kMaxScanBytes = 16 * 1024 * 1024;
 			char first[16] = "m87";
-			while (ptr && memcmp(ptr, first, sizeof(first)) != 0) {
+			while (ptr && (ptr - start) < kMaxScanBytes && memcmp(ptr, first, sizeof(first)) != 0) {
 				//printf("%08X: %02X\n", ptr-start, ptr[0]);
 				ptr++;
+			}
+
+			if (ptr && (ptr - start) >= kMaxScanBytes) {
+				fprintf(stderr, "Unable to find AccumulatorPlatformStructLookupArray pattern within search window\n");
+				ptr = NULL;
 			}
 
 			lookup_arr = (struct PlatformStructLookup *)ptr;

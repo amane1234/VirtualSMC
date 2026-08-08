@@ -5,10 +5,18 @@
 //  Copyright © 2023 xCuri0. All rights reserved.
 //
 
+#include <csignal>
+
 #include "fanpwmgen.hpp"
 
 int g_fan = -1;
 char *g_fanpwm;
+
+// Set by the SIGINT handler and polled from the main loop. printf/IOKit calls
+// (as restoreAuto used to make directly from the handler) are not async-signal-safe
+// and could deadlock libc/IOKit if SIGINT lands mid-call; the handler itself must only
+// touch this flag.
+static volatile sig_atomic_t g_interrupted = 0;
 
 float fltToFpe2(uint16_t *str, int size) {
   if (size != 2)
@@ -80,6 +88,13 @@ uint16_t getRpm(uint8_t fan) {
 }
 
 void restoreAuto(int sig) {
+	g_interrupted = 1;
+}
+
+static void handleInterruptIfAny() {
+	if (!g_interrupted)
+		return;
+
 	printf("\nCTRL-C detected, restoring automatic fan control before exiting\n");
 	setManual(g_fan, false);
 	SMCClose();
@@ -116,6 +131,11 @@ int main(int argc, char *argv[]) {
 		usage(argv[0]);
 		return 1;
 	}
+	if (steps <= 0 || steps > 255) {
+		printf("steps <%d> must be between 1 and 255\n", steps);
+
+		return 1;
+	}
 	if (255 % steps) {
 		printf("steps <%d> doesn't multiply to 255\n", steps);
 
@@ -126,7 +146,14 @@ int main(int argc, char *argv[]) {
 
 		return 1;
 	}
-	g_fanpwm = (char*)malloc((steps * 10) + 1); // max 10 chars for each section
+	// calloc (not malloc) so g_fanpwm starts as an empty C string: the loop below
+	// appends via strlen(g_fanpwm), which is undefined on unwritten, uninitialized
+	// malloc'd memory.
+	g_fanpwm = (char*)calloc(1, (steps * 10) + 1); // max 10 chars for each section
+	if (!g_fanpwm) {
+		printf("failed to allocate fan pwm buffer\n");
+		return 1;
+	}
 
 	printf("\e[1mAvoid high CPU/GPU load activity while this is running as your fans will slow down\e[m\n\n");
 	printf("\e[1mMake sure all fan control software is closed\e[m\n\n");
@@ -151,11 +178,14 @@ int main(int argc, char *argv[]) {
 			sleep(time * 3);
 		else
 			sleep(time);
+		handleInterruptIfAny();
+
 		// cause quickReschedule to be called so RPM data is updated
 		getRpm(g_fan);
 
 		// 100ms should be more than enough
 		usleep(100 * 1000);
+		handleInterruptIfAny();
 
 		rpm2 = getRpm(g_fan);
 

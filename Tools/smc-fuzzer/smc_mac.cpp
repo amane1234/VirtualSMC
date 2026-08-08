@@ -153,7 +153,13 @@ bool SMCReadKey(const std::string &key, SMCVal_t *val) {
   if (result != kIOReturnSuccess)
     return false;
 
+  // keyInfo.dataSize comes straight from the kernel driver's response and is not
+  // validated by the driver against the fixed 32-byte SMCBytes_t; callers (printSInt,
+  // printUInt, printBytesHex, ...) index val->bytes[0..dataSize) directly, so clamp
+  // here rather than trust an arbitrary uint32_t from the kernel call.
   val->dataSize = outputStructure.keyInfo.dataSize;
+  if (val->dataSize > sizeof(val->bytes))
+    val->dataSize = sizeof(val->bytes);
   _ultostr(val->dataType, outputStructure.keyInfo.dataType);
   inputStructure.keyInfo.dataSize = val->dataSize;
   inputStructure.data8 = SMC_CMD_READ_BYTES;
