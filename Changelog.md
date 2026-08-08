@@ -3,6 +3,14 @@ VirtualSMC Changelog
 #### v1.3.8
 - Reduced unneeded power source notifications to remove repeated "PMRD: clamshell closed 0, disabled 0/0, desktopMode 0, ac 0" messages in kernel log
 - Fixed freezing of battery percentage when the battery is 100% charged initially but the system is connected to an insufficiently powerful AC adapter
+- Fixed a kernel heap out-of-bounds read in the SMC PMIO protocol that could leak kernel memory on a key-size mismatch
+- Fixed unbounded recursion (kernel stack overflow) in ITE SuperIO fan curve lookup when a fan's PWM curve had no valid points
+- Fixed a hang/use-after-free in SMCProcessor's per-CPU worker threads on a partially failed start()
+- Fixed out-of-bounds reads on non-NUL-terminated device-tree string properties in SMCSuperIO/ITEDevice
+- Fixed an off-by-one heap buffer overflow in SMCBatteryManager's ACPI battery/adapter discovery
+- Fixed fan/temperature sensor data being written to the wrong slot in SMCDellSensors
+- Wired up IT8638 (Device_0x8638) into the ITE device dispatch chain, fixing a chip that was implemented but never reachable
+- Fixed buffer and integer overflows in smc-fuzzer, smcread, and fanpwmgen userspace tools
 
 #### v1.3.7
 - Added constants for macOS 26 support
