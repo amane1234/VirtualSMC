@@ -13,19 +13,31 @@ BatteryManager *BatteryManager::instance = nullptr;
 OSDefineMetaClassAndStructors(BatteryManager, OSObject)
 
 void BatteryInfo::validateData(int32_t id) {
-	if (!state.designVoltage)
+	// ACPI reports unknown values as 0xFFFFFFFF. They must not go through the unit conversion below
+	// (the multiplication overflowed into an arbitrary value), and unknown warning/low thresholds are
+	// treated as absent: an unknown warning capacity used to mark every battery as bad (BBAD), since
+	// lastFullChargeCapacity < 2 * 0xFFFFFFFF is always true.
+	auto known = [](uint32_t value) { return value != ValueUnknown && value <= ValueMax; };
+	if (!state.designVoltage || !known(state.designVoltage))
 		state.designVoltage = DummyVoltage;
+	if (!known(state.designCapacityWarning))
+		state.designCapacityWarning = 0;
+	if (!known(state.designCapacityLow))
+		state.designCapacityLow = 0;
 	if (state.powerUnitIsWatt) {
 		auto mV = state.designVoltage;
+		auto toMAh = [mV, &known](uint32_t value) {
+			return known(value) ? static_cast<uint32_t>(static_cast<uint64_t>(value) * 1000 / mV) : value;
+		};
 		DBGLOG("binfo", "battery %d design voltage %d,%03d", id, mV / 1000, mV % 1000);
-		if (designCapacity * 1000 / mV < 900) {
+		if (known(designCapacity) && toMAh(designCapacity) < 900) {
 			SYSLOG("binfo", "battery %d reports mWh but uses mAh (%u)", id, designCapacity);
 			state.powerUnitIsWatt = false;
 		} else {
-			designCapacity = designCapacity * 1000 / mV;
-			state.lastFullChargeCapacity = state.lastFullChargeCapacity * 1000 / mV;
-			state.designCapacityWarning = state.designCapacityWarning * 1000 / mV;
-			state.designCapacityLow = state.designCapacityLow * 1000 / mV;
+			designCapacity = toMAh(designCapacity);
+			state.lastFullChargeCapacity = toMAh(state.lastFullChargeCapacity);
+			state.designCapacityWarning = toMAh(state.designCapacityWarning);
+			state.designCapacityLow = toMAh(state.designCapacityLow);
 		}
 	}
 
@@ -90,10 +102,11 @@ void BatteryManager::checkDevices() {
 		DBGLOG("bmgr", "quick poll");
 		timerEventSource->setTimeoutMS(ACPIBattery::QuickPollInterval);
 	} else {
-		uint8_t timerDelta = (getCurrentTimeNs() - lastAccess) / (1000000 * ACPIBattery::QuickPollInterval);
+		// Computed in 64 bits: as uint8_t, a delta of 256 s or more wrapped around and could look recent
+		uint64_t timerDelta = (getCurrentTimeNs() - lastAccess) / (1000000ULL * ACPIBattery::QuickPollInterval);
 		if (timerDelta < 55) {
 			DBGLOG("bmgr", "sync normal poll");
-			timerEventSource->setTimeoutMS(ACPIBattery::NormalPollInterval - (2 + timerDelta) * ACPIBattery::QuickPollInterval);
+			timerEventSource->setTimeoutMS(ACPIBattery::NormalPollInterval - static_cast<uint32_t>(2 + timerDelta) * ACPIBattery::QuickPollInterval);
 		} else {
 			DBGLOG("bmgr", "normal poll");
 			timerEventSource->setTimeoutMS(ACPIBattery::NormalPollInterval);
@@ -103,6 +116,8 @@ void BatteryManager::checkDevices() {
 
 void BatteryManager::externalPowerNotify(bool status) {
 	IOPMrootDomain *rd = IOACPIPlatformDevice::getPMRootDomain();
+	if (!rd)
+		return;
 	rd->receivePowerNotification(kIOPMSetACAdaptorConnected | (kIOPMSetValue * status));
 }
 
@@ -246,6 +261,7 @@ bool BatteryManager::probe() {
 		auto dict = IOService::nameMatching("AppleACPIPlatformExpert");
 		if (!dict) {
 			SYSLOG("bmgr", "failed to create acpi matching dictionary");
+			IOLockUnlock(mainLock);   // returning with it held deadlocked every later caller
 			return false;
 		}
 		
@@ -260,6 +276,7 @@ bool BatteryManager::probe() {
 
 		if (!acpi) {
 			SYSLOG("bmgr", "failed to wait for acpi");
+			IOLockUnlock(mainLock);
 			return false;
 		}
 

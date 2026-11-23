@@ -132,6 +132,11 @@ class EXPORT SMCLightSensor : public IOService {
 	_Atomic(uint32_t) currentLux;
 
 	/**
+	 *  The first poll always posts the ALS interrupt, later ones only when the value changed
+	 */
+	bool postedOnce {false};
+
+	/**
 	 *  Supported ALS bits
 	 */
 	ALSForceBits forceBits;

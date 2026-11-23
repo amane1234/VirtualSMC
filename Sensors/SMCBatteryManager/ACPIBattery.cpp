@@ -282,7 +282,9 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 				}
 			}
 		}
-		supplement->release();
+		// supplement is null when _BSS could not be evaluated (e.g. EC busy right after wake):
+		// releasing it unconditionally was a kernel panic
+		OSSafeReleaseNULL(supplement);
 	}
 
 	st.state = getNumberFromArray(status, BSTState);
@@ -290,8 +292,14 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 	st.remainingCapacity = getNumberFromArray(status, BSTRemainingCapacity);
 	st.presentVoltage = getNumberFromArray(status, BSTPresentVoltage);
 	if (st.powerUnitIsWatt) {
-		st.presentRate = st.presentRate * 1000 / st.designVoltage;
-		st.remainingCapacity = st.remainingCapacity * 1000 / st.designVoltage;
+		// Leave unknown values (0xFFFFFFFF) as they are, so the fallbacks below recognise them;
+		// converting them overflowed into an arbitrary rate/capacity
+		auto toMAh = [&st](uint32_t value) {
+			return (st.designVoltage && value != BatteryInfo::ValueUnknown && value <= BatteryInfo::ValueMax) ?
+				static_cast<uint32_t>(static_cast<uint64_t>(value) * 1000 / st.designVoltage) : value;
+		};
+		st.presentRate = toMAh(st.presentRate);
+		st.remainingCapacity = toMAh(st.remainingCapacity);
 	}
 
 	// Sometimes this value can be either reported incorrectly or miscalculated

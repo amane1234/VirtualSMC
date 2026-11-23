@@ -40,6 +40,20 @@ class EXPORT SMCSMBusController : public IOSMBusController {
 	static void setReceiveData(IOSMBusTransaction *transaction, uint16_t valueToWrite);
 
 	/**
+	 *  SMBus battery words are 16 bit, while the battery state keeps 32-bit values. Passing them to the
+	 *  uint16_t version truncated them: e.g. a time to empty of 240000 minutes on AC (rate 0) became 43392.
+	 *  These clamp instead (0xFFFF is also the SMBus "unknown" value); signed currents clamp to int16.
+	 */
+	static void setReceiveData(IOSMBusTransaction *transaction, uint32_t valueToWrite) {
+		setReceiveData(transaction, static_cast<uint16_t>(valueToWrite > UINT16_MAX ? UINT16_MAX : valueToWrite));
+	}
+	static void setReceiveData(IOSMBusTransaction *transaction, int32_t valueToWrite) {
+		if (valueToWrite > INT16_MAX) valueToWrite = INT16_MAX;
+		if (valueToWrite < INT16_MIN) valueToWrite = INT16_MIN;
+		setReceiveData(transaction, static_cast<uint16_t>(static_cast<int16_t>(valueToWrite)));
+	}
+
+	/**
 	 *  Sensible defaults for timer probing and rechecking the new commands.
 	 *  Note: when it was 1000, after extending the code it failed to read all data in 10 seconds,
 	 *  so AppleSmartBatteryManager aborted polling.

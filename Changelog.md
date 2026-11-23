@@ -5,6 +5,14 @@ VirtualSMC Changelog
 - Fixed the private-key unlock gate (KeyKPPW/KeyKPST) being permanently non-functional since the initial 2018 commit due to the unlock flag being cleared before its own consumer got to check it
 - Fixed a null-pointer dereference in SMCBatteryManager's ACPI battery status/info handling when evaluateObject() reports success with a null object
 - Fixed an out-of-bounds heap read when copying a non-NUL-terminated hardware model name from a ModelInfo/OverrideModelInfo plist entry
+- Fixed a kernel panic in SMCBatteryManager when `_BSS` supplement status could not be evaluated (e.g. EC busy after wake)
+- Fixed SMCBatteryManager reporting the battery as bad (BBAD) when ACPI reports an unknown warning capacity
+- Fixed unit conversion of unknown (0xFFFFFFFF) battery values on mWh batteries overflowing into an arbitrary rate/capacity
+- Fixed BatteryManager probe returning with its lock held on early failures, deadlocking later callers
+- Fixed SMBus battery words (e.g. time to empty on AC) being truncated instead of clamped to 16 bits
+- Fixed poll scheduling delta wrapping around after 256 s since the last SMBus access
+- SMCLightSensor now posts the ALS change interrupt only when the value changed instead of every second
+- SMCLightSensor keeps a reference to the ALS ACPI device it polls
 
 #### v1.3.8
 - Reduced unneeded power source notifications to remove repeated "PMRD: clamshell closed 0, disabled 0/0, desktopMode 0, ac 0" messages in kernel log

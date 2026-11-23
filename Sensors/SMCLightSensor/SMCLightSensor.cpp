@@ -62,6 +62,9 @@ IOService *SMCLightSensor::probe(IOService *provider, SInt32 *score) {
 	}
 
 	alsdDevice = OSDynamicCast(IOACPIPlatformDevice, deviceIterator->getNextObject());
+	// Keep our own reference: the iterator's goes away with it, and the device is used for every poll
+	if (alsdDevice)
+		alsdDevice->retain();
 	deviceIterator->release();
 	
 	if (!alsdDevice) {
@@ -71,6 +74,7 @@ IOService *SMCLightSensor::probe(IOService *provider, SInt32 *score) {
 
 	if (alsdDevice->validateObject("_ALI") != kIOReturnSuccess || !refreshSensor(false)) {
 		SYSLOG("alsd", "No functional _ALI method on ALSD device");
+		OSSafeReleaseNULL(alsdDevice);
 		return nullptr;
 	}
 
@@ -163,10 +167,16 @@ bool SMCLightSensor::refreshSensor(bool post) {
 	if (ret != kIOReturnSuccess)
 		lux = 0xFFFFFFFF; // ACPI invalid
 
-	atomic_store_explicit(&currentLux, lux, memory_order_release);
+	uint32_t previousLux = atomic_exchange_explicit(&currentLux, lux, memory_order_acq_rel);
 
 	if (post) {
-		VirtualSMCAPI::postInterrupt(SmcEventALSChange);
+		// Only tell macOS when the value changed. Posting the ALS interrupt every second regardless
+		// made the system re-read the sensor and re-evaluate the backlight once a second even in a dark,
+		// idle room, which costs wakeups for nothing.
+		if (lux != previousLux || !postedOnce) {
+			VirtualSMCAPI::postInterrupt(SmcEventALSChange);
+			postedOnce = true;
+		}
 		poller->setTimeoutMS(SensorUpdateTimeoutMS);
 	}
 
