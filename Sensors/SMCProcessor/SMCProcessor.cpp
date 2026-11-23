@@ -129,6 +129,15 @@ void SMCProcessor::staticThreadEntry(thread_call_param_t param0, thread_call_par
 	ml_set_interrupts_enabled(enable);
 #endif
 	
+	// updateCounters() ignores hyper-threaded siblings, so their threads only woke their CPU every
+	// TimerTimeoutMs for nothing. Let them end right away (the first physicalCount logical CPUs of a
+	// package are the physical cores, see CPUInfo::CpuTopology).
+	auto package = that->cpuTopology.numberToPackage[cpu];
+	if (that->cpuTopology.numberToLogical[cpu] >= that->cpuTopology.physicalCount[package]) {
+		DBGLOG("scpu", "CPU %u is a hyper-threaded sibling, no worker needed", cpu);
+		return;
+	}
+
 	while (!atomic_load_explicit(&that->stopWorkers, memory_order_relaxed)) {
 		IOSleep(TimerTimeoutMs);
 		that->updateCounters(cpu);
@@ -197,11 +206,11 @@ void SMCProcessor::timerCallback() {
 			timerEnergyLastTime = time;
 			for (size_t i = 0; i < cpuTopology.packageCount; i++) {
 				for (size_t j = 0; j < Counters::EnergyTotal; j++) {
-					double p;
-					if (counters.energyAfter[i][j] < counters.energyBefore[i][j])
-						p = UINT64_MAX - counters.energyBefore[i][j] + counters.energyAfter[i][j];
-					else
-						p = counters.energyAfter[i][j] - counters.energyBefore[i][j];
+					// RAPL energy status counters are 32 bits wide (bits 63:32 are reserved). Wrapping around
+					// UINT64_MAX turned every counter overflow (every few hours) into an absurd power spike;
+					// 32-bit unsigned subtraction handles the wrap.
+					double p = static_cast<uint32_t>(static_cast<uint32_t>(counters.energyAfter[i][j]) -
+													 static_cast<uint32_t>(counters.energyBefore[i][j]));
 
 					counters.energyBefore[i][j] = counters.energyAfter[i][j];
 					counters.power[i][j] = p / (energyDelta / 1000000000.0) * counters.energyUnits[i];

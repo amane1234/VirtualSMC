@@ -13,6 +13,9 @@ VirtualSMC Changelog
 - Fixed poll scheduling delta wrapping around after 256 s since the last SMBus access
 - SMCLightSensor now posts the ALS change interrupt only when the value changed instead of every second
 - SMCLightSensor keeps a reference to the ALS ACPI device it polls
+- Fixed SMCProcessor reporting an absurd power value whenever a 32-bit RAPL energy counter wrapped around
+- SMCProcessor no longer keeps polling threads for hyper-threaded logical CPUs, which only woke those CPUs every 500 ms
+- Fixed SMCDellSensors possibly blocking system sleep forever while waiting for queued fan updates
 
 #### v1.3.8
 - Reduced unneeded power source notifications to remove repeated "PMRD: clamshell closed 0, disabled 0/0, desktopMode 0, ac 0" messages in kernel log

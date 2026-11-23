@@ -286,7 +286,15 @@ void SMIMonitor::handlePowerOff() {
 			postSmcUpdate(KeyFS__, -1, &data, sizeof(data), true);
 		}
 		DBGLOG("sdell", "SMIMonitor switched to sleep state, smc updates before sleep: %zu", storedSmcUpdates.size());
-		while (storedSmcUpdates.size() != 0) { IOSleep(10); }
+		// Let the update thread apply the queued updates (above all the fan reset), but do not block system
+		// sleep forever if SMM stops answering: this used to wait without any limit.
+		for (int waited = 0; storedSmcUpdates.size() != 0; waited += 10) {
+			if (waited >= 3000) {
+				SYSLOG("sdell", "SMIMonitor: %zu smc updates still pending before sleep, continuing", storedSmcUpdates.size());
+				break;
+			}
+			IOSleep(10);
+		}
 		awake = false;
 	}
 }
