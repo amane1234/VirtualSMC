@@ -138,10 +138,39 @@ void SMCProcessor::staticThreadEntry(thread_call_param_t param0, thread_call_par
 		return;
 	}
 
+	// Each physical core used to wake every TimerTimeoutMs forever, even when nothing read the CPU
+	// sensors. Park the worker while the keys are not read and resume on the next read.
+	bool resumed = false;
 	while (!atomic_load_explicit(&that->stopWorkers, memory_order_relaxed)) {
-		IOSleep(TimerTimeoutMs);
+		if (that->workersIdle()) {
+			uint64_t deadline;
+			clock_interval_to_deadline(WorkerIdleWaitMs, kMillisecondScale, &deadline);
+			IOLockLock(that->workerLock);
+			if (that->workersIdle() && !atomic_load_explicit(&that->stopWorkers, memory_order_relaxed))
+				IOLockSleepDeadline(that->workerLock, &that->lastKeyReadNs, deadline, THREAD_UNINT);
+			IOLockUnlock(that->workerLock);
+			resumed = true;
+			continue;
+		}
+
+		if (resumed) {
+			// Read at once so the first values after a pause are fresh, and restart the energy
+			// baselines: a 32-bit RAPL counter can wrap during a long pause.
+			resumed = false;
+			that->resetEnergyBaseline(cpu);
+		} else {
+			IOSleep(TimerTimeoutMs);
+		}
 		that->updateCounters(cpu);
 	}
+}
+
+void SMCProcessor::resetEnergyBaseline(uint32_t cpu) {
+	if (cpu >= CPUInfo::MaxCpus || cpuTopology.numberToLogical[cpu] != 0)
+		return;
+	auto package = cpuTopology.numberToPackage[cpu];
+	for (size_t i = 0; i < Counters::EnergyTotal; i++)
+		counters.energyBefore[package][i] = 0;
 }
 
 void SMCProcessor::updateCounters(uint32_t cpu) {
@@ -367,17 +396,20 @@ bool SMCProcessor::start(IOService *provider) {
 	DBGLOG("scpu", "obtained generation %d %X:%X:%X", cpuGeneration, cpuFamily, cpuModel, cpuStepping);
 
 	atomic_init(&stopWorkers, false);
+	// Let the workers run for the first WorkerIdleNs so early reads see current values
+	atomic_init(&lastKeyReadNs, getCurrentTimeNs());
 
 	// Prepare time sources and event loops
 	bool success = true;
 	counterLock = IOSimpleLockAlloc();
+	workerLock = IOLockAlloc();
 	workloop = IOWorkLoop::workLoop();
 	timerEventSource = IOTimerEventSource::timerEventSource(this, [](OSObject *object, IOTimerEventSource *sender) {
 		auto cp = OSDynamicCast(SMCProcessor, object);
 		if (cp) cp->timerCallback();
 	});
-	if (!timerEventSource || !workloop || !counterLock) {
-		SYSLOG("scpu", "failed to create workloop, timer event source, or counter lock");
+	if (!timerEventSource || !workloop || !counterLock || !workerLock) {
+		SYSLOG("scpu", "failed to create workloop, timer event source, counter lock or worker lock");
 		success = false;
 	}
 
@@ -433,6 +465,7 @@ bool SMCProcessor::start(IOService *provider) {
 		// succeed (the call is permanently "active") and the loop underneath spins
 		// forever while the orphaned workers keep dereferencing this freed instance.
 		atomic_store_explicit(&stopWorkers, true, memory_order_relaxed);
+		wakeWorkers();
 
 		if (counterLock) {
 			IOSimpleLockFree(counterLock);
@@ -442,6 +475,11 @@ bool SMCProcessor::start(IOService *provider) {
 			while (threadHandles[cpu] && !thread_call_free(threadHandles[cpu]))
 				thread_call_cancel(threadHandles[cpu]);
 			threadHandles[cpu] = nullptr;
+		}
+		// Workers have exited once their thread calls could be freed
+		if (workerLock) {
+			IOLockFree(workerLock);
+			workerLock = nullptr;
 		}
 		OSSafeReleaseNULL(workloop);
 		OSSafeReleaseNULL(timerEventSource);
@@ -498,6 +536,12 @@ bool SMCProcessor::start(IOService *provider) {
 }
 
 void SMCProcessor::quickReschedule() {
+	// A key read resumes parked workers
+	auto now = getCurrentTimeNs();
+	auto previous = atomic_exchange_explicit(&lastKeyReadNs, now, memory_order_relaxed);
+	if (now - previous > WorkerIdleNs)
+		wakeWorkers();
+
 	if (!timerEventScheduled) {
 		// Make it 10 times faster
 		timerEventScheduled = timerEventSource->setTimeoutMS(TimerTimeoutMs/10) == kIOReturnSuccess;

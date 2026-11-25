@@ -48,6 +48,23 @@ class EXPORT SMCLightSensor : public IOService {
 	static constexpr uint32_t SensorUpdateTimeoutMS {1000};
 
 	/**
+	 *  Poll interval once the reading stayed the same for StableReadingsBeforeBackoff polls.
+	 *  On machines whose _ALI returns a firmware constant (no real sensor, as on many Dell laptops)
+	 *  this cuts the ACPI evaluations and wakeups by two thirds; a change returns to 1 s at once.
+	 */
+	static constexpr uint32_t SensorStableTimeoutMS {3000};
+
+	/**
+	 *  Unchanged readings before switching to SensorStableTimeoutMS
+	 */
+	static constexpr uint32_t StableReadingsBeforeBackoff {10};
+
+	/**
+	 *  Consecutive polls that returned the same value
+	 */
+	uint32_t stableReadings {0};
+
+	/**
 	 *  Key name definitions
 	 */
 	static constexpr SMC_KEY KeyAL   = SMC_MAKE_IDENTIFIER('A','L','!',' ');

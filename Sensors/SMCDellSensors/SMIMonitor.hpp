@@ -244,6 +244,18 @@ private:
 	 */
 	atomic_int force_update_counter = 0;
 
+	/**
+	 *  Interval between fan speed and temperature refreshes. Each reading is a System Management
+	 *  Interrupt, which stops every CPU while the firmware runs. Before, the thread woke CPU 0 every
+	 *  100 ms and refreshed the sensors about every 2.5 to 4 s, depending on the sensor count.
+	 */
+	static constexpr uint32_t SensorPollIntervalMs {3000};
+
+	/**
+	 *  Longest wait while the monitor is not awake (system going to sleep or waking up)
+	 */
+	static constexpr uint32_t NotAwakeWaitMs {1000};
+
 private:
 
 	/**
@@ -278,10 +290,22 @@ private:
 	 */
 	void updateSensorsLoop();
 
-	/*
-	 * Handle SMC updates in idle
+	/**
+	 *  Apply every queued SMC update (fan mode and target speed writes)
 	 */
-	void handleSmcUpdatesInIdle(int idle_loop_count);
+	void handlePendingSmcUpdates();
+
+	/**
+	 *  Sleep until an SMC update is posted, the monitor wakes up, or the deadline passes
+	 *
+	 *  @param deadline  absolute time to stop waiting at
+	 */
+	void waitForWork(uint64_t deadline);
+
+	/**
+	 *  Wake the update thread, for example after an SMC update was posted
+	 */
+	void wakeUpdateThread();
 
 	/**
 	 *  SMC update handlers

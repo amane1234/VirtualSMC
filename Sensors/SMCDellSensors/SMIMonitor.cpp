@@ -303,6 +303,7 @@ void SMIMonitor::handlePowerOn() {
 	if (!awake) {
 		awake = true;
 		ignore_new_smc_updates = false;
+		wakeUpdateThread();
 		DBGLOG("sdell", "SMIMonitor switched to awake state");
 	}
 }
@@ -353,7 +354,9 @@ bool SMIMonitor::postSmcUpdate(SMC_KEY key, size_t index, const void *data, uint
 	}
 	IOSimpleLockUnlock(queueLock);
 	
-	if (!success)
+	if (success)
+		wakeUpdateThread();
+	else
 		SYSLOG("sdell", "unable to store smc update");
 
 	return success;
@@ -517,65 +520,87 @@ void SMIMonitor::updateSensorsLoop() {
 
 	i8k_set_fan_control_auto(); // force automatic control
 
+	uint64_t nextPoll = 0;
 	while (true) {
-		
-		bool force_access = (--force_update_counter >= 0);
+		handlePendingSmcUpdates();
 
-		for (int i=0; i<fanCount && awake; ++i)
-		{
-			int sensor = state.fanInfo[i].index;
-			int rc = i8k_get_fan_speed(sensor, force_access);
-			if (rc >= 0)
-				state.fanInfo[i].speed = rc;
-			else
-				DBGLOG("sdell", "SMM reading error %d for fan %d", rc, sensor);
-			handleSmcUpdatesInIdle(4);
+		if (awake && mach_absolute_time() >= nextPoll) {
+			// Saturate at zero instead of counting down forever.
+			bool force_access = atomic_load_explicit(&force_update_counter, memory_order_relaxed) > 0;
+			if (force_access)
+				--force_update_counter;
+
+			for (int i=0; i<fanCount && awake; ++i)
+			{
+				int sensor = state.fanInfo[i].index;
+				int rc = i8k_get_fan_speed(sensor, force_access);
+				if (rc >= 0)
+					state.fanInfo[i].speed = rc;
+				else
+					DBGLOG("sdell", "SMM reading error %d for fan %d", rc, sensor);
+				// Fan control writes must not wait for the whole sensor round.
+				handlePendingSmcUpdates();
+			}
+
+			for (int i=0; i<tempCount && awake; ++i)
+			{
+				int sensor = state.tempInfo[i].index;
+				int rc = i8k_get_temp(sensor, force_access);
+				if (rc >= 0)
+					state.tempInfo[i].temp = rc;
+				else
+					DBGLOG("sdell", "SMM reading error %d for temp sensor %d", rc, sensor);
+				handlePendingSmcUpdates();
+			}
+
+			clock_interval_to_deadline(SensorPollIntervalMs, kMillisecondScale, &nextPoll);
 		}
 
-		for (int i=0; i<tempCount && awake; ++i)
-		{
-			int sensor = state.tempInfo[i].index;
-			int rc = i8k_get_temp(sensor, force_access);
-			if (rc >= 0)
-				state.tempInfo[i].temp = rc;
-			else
-				DBGLOG("sdell", "SMM reading error %d for temp sensor %d", rc, sensor);
-			handleSmcUpdatesInIdle(4);
-		}
-		
-		handleSmcUpdatesInIdle(5);
+		uint64_t deadline = nextPoll;
+		if (!awake)
+			clock_interval_to_deadline(NotAwakeWaitMs, kMillisecondScale, &deadline);
+		waitForWork(deadline);
 	}
 }
 
-void SMIMonitor::handleSmcUpdatesInIdle(int idle_loop_count)
-{
-	for (int i=0; i<idle_loop_count; ++i)
-	{
-		if (awake && storedSmcUpdates.size() != 0) {
-			IOSimpleLockLock(queueLock);
-			if (storedSmcUpdates.size() > 0) {
-				StoredSmcUpdate update = storedSmcUpdates[0];
-				storedSmcUpdates.erase(0, false);
-				IOSimpleLockUnlock(queueLock);
-				
-				switch (update.key) {
-					case KeyF0Md:
-						hanldeManualControlUpdate(update.index, update.data);
-						break;
-					case KeyF0Tg:
-						hanldeManualTargetSpeedUpdate(update.index, update.data);
-						break;
-					case KeyFS__:
-						handleManualForceFanControlUpdate(update.data);
-						break;
-				}
-			}
-			else {
-				IOSimpleLockUnlock(queueLock);
-			}
-		}
+void SMIMonitor::waitForWork(uint64_t deadline) {
+	// The thread used to wake CPU 0 every 100 ms only to look at the update queue. Sleep until the
+	// next sensor refresh instead; postSmcUpdate() and handlePowerOn() wake it earlier. The waker does
+	// not take mainLock (SMC key writes may run where a mutex is not allowed), so a wakeup that races
+	// with the check below is lost; the deadline bounds that delay.
+	IOLockLock(mainLock);
+	if (storedSmcUpdates.size() == 0 && mach_absolute_time() < deadline)
+		IOLockSleepDeadline(mainLock, &storedSmcUpdates, deadline, THREAD_UNINT);
+	IOLockUnlock(mainLock);
+}
 
-		IOSleep(100);
+void SMIMonitor::wakeUpdateThread() {
+	IOLockWakeup(mainLock, &storedSmcUpdates, true);
+}
+
+void SMIMonitor::handlePendingSmcUpdates()
+{
+	while (awake && storedSmcUpdates.size() != 0) {
+		IOSimpleLockLock(queueLock);
+		if (storedSmcUpdates.size() == 0) {
+			IOSimpleLockUnlock(queueLock);
+			break;
+		}
+		StoredSmcUpdate update = storedSmcUpdates[0];
+		storedSmcUpdates.erase(0, false);
+		IOSimpleLockUnlock(queueLock);
+
+		switch (update.key) {
+			case KeyF0Md:
+				hanldeManualControlUpdate(update.index, update.data);
+				break;
+			case KeyF0Tg:
+				hanldeManualTargetSpeedUpdate(update.index, update.data);
+				break;
+			case KeyFS__:
+				handleManualForceFanControlUpdate(update.data);
+				break;
+		}
 	}
 }
 

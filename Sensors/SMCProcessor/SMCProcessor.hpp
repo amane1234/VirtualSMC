@@ -229,6 +229,41 @@ class EXPORT SMCProcessor : public IOService {
 	atomic_bool stopWorkers;
 
 	/**
+	 *  Time of the last CPU sensor key read in nanoseconds (see quickReschedule)
+	 */
+	_Atomic(uint64_t) lastKeyReadNs;
+
+	/**
+	 *  Lock and event used to park the per-core workers while nobody reads the sensors
+	 */
+	IOLock *workerLock {nullptr};
+
+	/**
+	 *  Workers stop reading MSRs after this long without a key read, like the energy timer
+	 */
+	static constexpr uint64_t WorkerIdleNs {MaxDeltaForRescheduleNs};
+
+	/**
+	 *  Longest wait of a parked worker; bounds a wakeup lost to a race with quickReschedule
+	 */
+	static constexpr uint32_t WorkerIdleWaitMs {30000};
+
+	/**
+	 *  Check whether the sensor keys were not read for WorkerIdleNs
+	 */
+	bool workersIdle() {
+		return getCurrentTimeNs() - atomic_load_explicit(&lastKeyReadNs, memory_order_relaxed) > WorkerIdleNs;
+	}
+
+	/**
+	 *  Wake parked workers, for example to let them exit
+	 */
+	void wakeWorkers() {
+		if (workerLock)
+			IOLockWakeup(workerLock, &lastKeyReadNs, false);
+	}
+
+	/**
 	 *  Helper function to bind current thread to specified CPU
 	 */
 	bool bindCurrentThreadToCpu(uint32_t cpu);
@@ -240,6 +275,11 @@ class EXPORT SMCProcessor : public IOService {
 	 *  @param param1 unused
 	 */
 	static void staticThreadEntry(thread_call_param_t param0, thread_call_param_t param1);
+
+	/**
+	 *  Restart the RAPL energy baselines of the package that cpu leads
+	 */
+	void resetEnergyBaseline(uint32_t cpu);
 
 	/**
 	 *  Timer scheduling status

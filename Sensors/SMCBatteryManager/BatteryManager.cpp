@@ -132,6 +132,15 @@ bool BatteryManager::decrementQuickPoll() {
 	} while (1);
 }
 
+uint32_t BatteryManager::notificationQuickPollCount() {
+	if (batteriesCount == 0)
+		return ACPIBattery::QuickPollCount;
+	for (uint32_t i = 0; i < batteriesCount; i++)
+		if (!batteries[i].presentRateAvailable)
+			return ACPIBattery::QuickPollCount;
+	return ACPIBattery::QuickPollCountWithRate;
+}
+
 bool BatteryManager::findBatteries() {
 	batteriesCount = 0;
 	auto iterator = IORegistryIterator::iterateOver(gIOACPIPlane, kIORegistryIterateRecursively);
@@ -220,7 +229,7 @@ IOReturn BatteryManager::acpiNotification(void *target, void *refCon, UInt32 mes
 		}
 		DBGLOG("bmgr", "%s received kIOACPIMessageDeviceNotification", safeString(provider->getName()));
 		if (!BatteryManager::getShared()->quickPollDisabled)
-			atomic_store_explicit(&self->quickPoll, ACPIBattery::QuickPollCount, memory_order_release);
+			atomic_store_explicit(&self->quickPoll, self->notificationQuickPollCount(), memory_order_release);
 
 		IOLockLock(self->mainLock);
 		self->checkDevices();

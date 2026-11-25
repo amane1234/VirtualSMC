@@ -87,8 +87,8 @@ bool SMCSMBusController::start(IOService *provider) {
 	});
 
 	if (timer) {
+		// Armed by startRequest() when a request is queued
 		getWorkLoop()->addEventSource(timer);
-		timer->setTimeoutMS(TimerTimeoutMs);
 	} else {
 		SYSLOG("smcbus", "failed to allocate normal timer event");
 		OSSafeReleaseNULL(workLoop);
@@ -368,6 +368,10 @@ IOSMBusStatus SMCSMBusController::startRequest(IOSMBusRequest *request) {
 		return kIOSMBusStatusUnknownFailure;
 	}
 
+	// Complete the request asynchronously. The timer used to re-arm itself every TimerTimeoutMs
+	// forever, waking the CPU 10 times a second with an empty queue.
+	timer->setTimeoutMS(RequestCompletionDelayMs);
+
 	IOSimpleLockLock(BatteryManager::getShared()->stateLock);
 	BatteryManager::getShared()->lastAccess = getCurrentTimeNs();
 	IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
@@ -376,8 +380,6 @@ IOSMBusStatus SMCSMBusController::startRequest(IOSMBusRequest *request) {
 }
 
 void SMCSMBusController::handleBatteryCommandsEvent() {
-	timer->setTimeoutMS(TimerTimeoutMs);
-
 	// requestQueue contains objects owned by two parties:
 	// 1. requestQueue itself, as the addition of any object retains it
 	// 2. IOSMBusController, since it does not release the object after passing it
@@ -416,7 +418,7 @@ IOReturn SMCSMBusController::setPowerState(unsigned long state, IOService *devic
 	if (state) {
 		DBGLOG("smcbus", "%s we are waking up", safeString(device->getName()));
 		if (!BatteryManager::getShared()->quickPollDisabled)
-			atomic_store_explicit(&BatteryManager::getShared()->quickPoll, ACPIBattery::QuickPollCount, memory_order_release);
+			atomic_store_explicit(&BatteryManager::getShared()->quickPoll, BatteryManager::getShared()->notificationQuickPollCount(), memory_order_release);
 		BatteryManager::getShared()->wake();
 	} else {
 		DBGLOG("smcbus", "%s we are sleeping", safeString(device->getName()));

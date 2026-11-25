@@ -50,6 +50,14 @@ public:
 	static constexpr uint32_t QuickPollCount = QuickPollPeriod / QuickPollInterval;
 
 	/**
+	 *  Amount of quick polls to do on ACPI notification when _BST reports a present rate.
+	 *  Dell firmware notifies the battery on most capacity changes, and every quick poll evaluates
+	 *  _STA, _PSR and _BST, each of which is a System Management Interrupt there. A short window still
+	 *  catches the charge state settling after the power source changes.
+	 */
+	static constexpr uint32_t QuickPollCountWithRate = 10000 / QuickPollInterval;
+
+	/**
 	 *  Battery status obtained from ACPI _BST
 	 */
 	enum {
@@ -123,6 +131,12 @@ public:
 	 *  QuickPoll will be disable when average rate is available from EC
 	 */
 	bool averageRateAvailable {false};
+
+	/**
+	 *  The last _BST reported a valid present rate. Written under the battery manager lock; a stale
+	 *  read only changes the length of one quick-poll window.
+	 */
+	bool presentRateAvailable {false};
 
 private:
 	uint32_t getNumberFromArray(OSArray *array, uint32_t index);

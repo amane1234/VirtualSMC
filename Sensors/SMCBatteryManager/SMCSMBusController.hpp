@@ -61,6 +61,13 @@ class EXPORT SMCSMBusController : public IOSMBusController {
 	static constexpr uint32_t TimerTimeoutMs = 100;
 
 	/**
+	 *  Delay before completing a queued request. The timer only runs while requests are queued, so
+	 *  this is shorter than the old periodic TimerTimeoutMs; a full AppleSmartBatteryManager update
+	 *  issues dozens of requests one after another.
+	 */
+	static constexpr uint32_t RequestCompletionDelayMs = 10;
+
+	/**
 	 *  A workloop in charge of handling timer events with requests.
 	 */
 	IOWorkLoop *workLoop {nullptr};

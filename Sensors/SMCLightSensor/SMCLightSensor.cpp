@@ -176,8 +176,11 @@ bool SMCLightSensor::refreshSensor(bool post) {
 		if (lux != previousLux || !postedOnce) {
 			VirtualSMCAPI::postInterrupt(SmcEventALSChange);
 			postedOnce = true;
+			stableReadings = 0;
+		} else if (stableReadings < StableReadingsBeforeBackoff) {
+			stableReadings++;
 		}
-		poller->setTimeoutMS(SensorUpdateTimeoutMS);
+		poller->setTimeoutMS(stableReadings >= StableReadingsBeforeBackoff ? SensorStableTimeoutMS : SensorUpdateTimeoutMS);
 	}
 
 	return ret == kIOReturnSuccess;

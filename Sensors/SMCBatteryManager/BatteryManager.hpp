@@ -99,6 +99,13 @@ public:
 	 *  @return true on success
 	 */
 	bool batteriesConnected();
+
+	/**
+	 *  Number of quick polls to schedule after an ACPI notification or a wake
+	 *
+	 *  @return QuickPollCountWithRate when every battery reports a present rate, QuickPollCount otherwise
+	 */
+	uint32_t notificationQuickPollCount();
 	
 	/**
 	 *  Checks whether any AC adapter is connected, must be guarded by stateLock
