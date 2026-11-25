@@ -135,10 +135,12 @@ bool BatteryManager::decrementQuickPoll() {
 uint32_t BatteryManager::notificationQuickPollCount() {
 	if (batteriesCount == 0)
 		return ACPIBattery::QuickPollCount;
+	bool allRates = true;
+	IOSimpleLockLock(stateLock);
 	for (uint32_t i = 0; i < batteriesCount; i++)
-		if (!batteries[i].presentRateAvailable)
-			return ACPIBattery::QuickPollCount;
-	return ACPIBattery::QuickPollCountWithRate;
+		allRates = allRates && state.btInfo[i].connected && state.btInfo[i].state.presentRateFromHardware;
+	IOSimpleLockUnlock(stateLock);
+	return allRates ? ACPIBattery::QuickPollCountWithRate : ACPIBattery::QuickPollCount;
 }
 
 bool BatteryManager::findBatteries() {

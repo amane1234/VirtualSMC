@@ -143,34 +143,51 @@ void SMCProcessor::staticThreadEntry(thread_call_param_t param0, thread_call_par
 	bool resumed = false;
 	while (!atomic_load_explicit(&that->stopWorkers, memory_order_relaxed)) {
 		if (that->workersIdle()) {
-			uint64_t deadline;
-			clock_interval_to_deadline(WorkerIdleWaitMs, kMillisecondScale, &deadline);
-			IOLockLock(that->workerLock);
-			if (that->workersIdle() && !atomic_load_explicit(&that->stopWorkers, memory_order_relaxed))
-				IOLockSleepDeadline(that->workerLock, &that->lastKeyReadNs, deadline, THREAD_UNINT);
-			IOLockUnlock(that->workerLock);
+			that->parkWorker();
 			resumed = true;
 			continue;
 		}
 
 		if (resumed) {
-			// Read at once so the first values after a pause are fresh, and restart the energy
-			// baselines: a 32-bit RAPL counter can wrap during a long pause.
+			// Read at once so the first values after a pause are fresh, then restart the energy
+			// baselines from those readings: a 32-bit RAPL counter can wrap during a long pause.
 			resumed = false;
+			that->updateCounters(cpu);
 			that->resetEnergyBaseline(cpu);
-		} else {
-			IOSleep(TimerTimeoutMs);
+			continue;
 		}
+
+		IOSleep(TimerTimeoutMs);
 		that->updateCounters(cpu);
 	}
+}
+
+void SMCProcessor::parkWorker() {
+	// Assert the wait first and check the condition afterwards. A key read that lands in between
+	// still finds this thread waiting and wakes it, so no wakeup is lost; quickReschedule() never
+	// needs a lock (key reads may run where a mutex is not allowed).
+	uint64_t deadline;
+	clock_interval_to_deadline(WorkerIdleWaitMs, kMillisecondScale, &deadline);
+	assert_wait_deadline(workerEvent(), THREAD_UNINT, deadline);
+	if (!workersIdle() || atomic_load_explicit(&stopWorkers, memory_order_relaxed)) {
+		// Cancel our own wait: thread_block() then returns at once. Other parked workers wake too
+		// and simply re-check.
+		wakeWorkers();
+	}
+	thread_block(THREAD_CONTINUE_NULL);
 }
 
 void SMCProcessor::resetEnergyBaseline(uint32_t cpu) {
 	if (cpu >= CPUInfo::MaxCpus || cpuTopology.numberToLogical[cpu] != 0)
 		return;
 	auto package = cpuTopology.numberToPackage[cpu];
+	// Under counterLock so timerCallback never sees a half-reset baseline, and with the energy
+	// timestamp restarted so the next power value covers only the time since this reading.
+	IOSimpleLockLock(counterLock);
 	for (size_t i = 0; i < Counters::EnergyTotal; i++)
-		counters.energyBefore[package][i] = 0;
+		counters.energyBefore[package][i] = counters.energyAfter[package][i];
+	timerEnergyLastTime = getCurrentTimeNs();
+	IOSimpleLockUnlock(counterLock);
 }
 
 void SMCProcessor::updateCounters(uint32_t cpu) {
@@ -402,14 +419,13 @@ bool SMCProcessor::start(IOService *provider) {
 	// Prepare time sources and event loops
 	bool success = true;
 	counterLock = IOSimpleLockAlloc();
-	workerLock = IOLockAlloc();
 	workloop = IOWorkLoop::workLoop();
 	timerEventSource = IOTimerEventSource::timerEventSource(this, [](OSObject *object, IOTimerEventSource *sender) {
 		auto cp = OSDynamicCast(SMCProcessor, object);
 		if (cp) cp->timerCallback();
 	});
-	if (!timerEventSource || !workloop || !counterLock || !workerLock) {
-		SYSLOG("scpu", "failed to create workloop, timer event source, counter lock or worker lock");
+	if (!timerEventSource || !workloop || !counterLock) {
+		SYSLOG("scpu", "failed to create workloop, timer event source, or counter lock");
 		success = false;
 	}
 
@@ -467,19 +483,15 @@ bool SMCProcessor::start(IOService *provider) {
 		atomic_store_explicit(&stopWorkers, true, memory_order_relaxed);
 		wakeWorkers();
 
-		if (counterLock) {
-			IOSimpleLockFree(counterLock);
-			counterLock = nullptr;
-		}
 		for (uint32_t cpu=0; cpu < cpuTopology.totalLogical(); ++cpu) {
 			while (threadHandles[cpu] && !thread_call_free(threadHandles[cpu]))
 				thread_call_cancel(threadHandles[cpu]);
 			threadHandles[cpu] = nullptr;
 		}
-		// Workers have exited once their thread calls could be freed
-		if (workerLock) {
-			IOLockFree(workerLock);
-			workerLock = nullptr;
+		// Free the lock only after the workers are gone: a resuming worker takes it.
+		if (counterLock) {
+			IOSimpleLockFree(counterLock);
+			counterLock = nullptr;
 		}
 		OSSafeReleaseNULL(workloop);
 		OSSafeReleaseNULL(timerEventSource);

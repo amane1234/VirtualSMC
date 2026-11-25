@@ -67,6 +67,8 @@ struct BatteryInfo {
 		bool batteryIsFull {true};
 		bool needUpdate {false};
 		bool publishTemperatureKey {false};
+		// The last _BST reported a valid present rate (before any capacity-delta estimate)
+		bool presentRateFromHardware {false};
 	};
 
 	/**

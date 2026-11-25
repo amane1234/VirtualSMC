@@ -290,8 +290,9 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 	st.state = getNumberFromArray(status, BSTState);
 	st.presentRate = getNumberFromArray(status, BSTPresentRate);
 	// With a present rate from _BST, quick polling only refreshes values that the ACPI notification
-	// already refreshed; it is needed for the capacity-delta rate estimate below.
-	presentRateAvailable = st.presentRate != 0 && st.presentRate != BatteryInfo::ValueUnknown &&
+	// already refreshed; it is needed for the capacity-delta rate estimate below. Stored in the state
+	// below, which is published under batteryInfoLock (the battery manager's stateLock).
+	st.presentRateFromHardware = st.presentRate != 0 && st.presentRate != BatteryInfo::ValueUnknown &&
 		st.presentRate <= BatteryInfo::ValueMax;
 	st.remainingCapacity = getNumberFromArray(status, BSTRemainingCapacity);
 	st.presentVoltage = getNumberFromArray(status, BSTPresentVoltage);

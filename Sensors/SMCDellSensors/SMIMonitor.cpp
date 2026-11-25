@@ -285,16 +285,20 @@ void SMIMonitor::handlePowerOff() {
 			UInt16 data = 0;
 			postSmcUpdate(KeyFS__, -1, &data, sizeof(data), true);
 		}
-		DBGLOG("sdell", "SMIMonitor switched to sleep state, smc updates before sleep: %zu", storedSmcUpdates.size());
+		DBGLOG("sdell", "SMIMonitor switched to sleep state");
 		// Let the update thread apply the queued updates (above all the fan reset), but do not block system
-		// sleep forever if SMM stops answering: this used to wait without any limit.
-		for (int waited = 0; storedSmcUpdates.size() != 0; waited += 10) {
-			if (waited >= 3000) {
-				SYSLOG("sdell", "SMIMonitor: %zu smc updates still pending before sleep, continuing", storedSmcUpdates.size());
-				break;
-			}
-			IOSleep(10);
-		}
+		// sleep forever if SMM stops answering: this used to wait without any limit. An empty queue is not
+		// enough: the last update may have been taken but not written yet, so wait for that one too.
+		uint64_t deadline;
+		clock_interval_to_deadline(PowerOffUpdateWaitMs, kMillisecondScale, &deadline);
+		IOLockLock(mainLock);
+		while ((hasPendingSmcUpdates() || atomic_load_explicit(&updateInProgress, memory_order_acquire)) &&
+			   mach_absolute_time() < deadline)
+			IOLockSleepDeadline(mainLock, &updateInProgress, deadline, THREAD_UNINT);
+		bool pending = hasPendingSmcUpdates() || atomic_load_explicit(&updateInProgress, memory_order_acquire);
+		IOLockUnlock(mainLock);
+		if (pending)
+			SYSLOG("sdell", "SMIMonitor: smc updates still pending before sleep, continuing");
 		awake = false;
 	}
 }
@@ -303,6 +307,7 @@ void SMIMonitor::handlePowerOn() {
 	if (!awake) {
 		awake = true;
 		ignore_new_smc_updates = false;
+		atomic_store_explicit(&wakeRequested, true, memory_order_release);
 		wakeUpdateThread();
 		DBGLOG("sdell", "SMIMonitor switched to awake state");
 	}
@@ -524,6 +529,9 @@ void SMIMonitor::updateSensorsLoop() {
 	while (true) {
 		handlePendingSmcUpdates();
 
+		if (atomic_exchange_explicit(&wakeRequested, false, memory_order_acq_rel))
+			nextPoll = 0; // refresh right after wake
+
 		if (awake && mach_absolute_time() >= nextPoll) {
 			// Saturate at zero instead of counting down forever.
 			bool force_access = atomic_load_explicit(&force_update_counter, memory_order_relaxed) > 0;
@@ -565,22 +573,30 @@ void SMIMonitor::updateSensorsLoop() {
 
 void SMIMonitor::waitForWork(uint64_t deadline) {
 	// The thread used to wake CPU 0 every 100 ms only to look at the update queue. Sleep until the
-	// next sensor refresh instead; postSmcUpdate() and handlePowerOn() wake it earlier. The waker does
-	// not take mainLock (SMC key writes may run where a mutex is not allowed), so a wakeup that races
-	// with the check below is lost; the deadline bounds that delay.
-	IOLockLock(mainLock);
-	if (storedSmcUpdates.size() == 0 && mach_absolute_time() < deadline)
-		IOLockSleepDeadline(mainLock, &storedSmcUpdates, deadline, THREAD_UNINT);
-	IOLockUnlock(mainLock);
+	// next sensor refresh instead; postSmcUpdate() and handlePowerOn() wake it earlier. Their wakeup
+	// does not take a lock (SMC key writes may run where a mutex is not allowed), so assert the wait
+	// first and check afterwards: a wakeup that lands in between still finds this thread waiting.
+	assert_wait_deadline(updateThreadEvent(), THREAD_UNINT, deadline);
+	if (hasPendingSmcUpdates() || atomic_load_explicit(&wakeRequested, memory_order_acquire) ||
+		mach_absolute_time() >= deadline)
+		wakeUpdateThread(); // cancels our own wait, thread_block() returns at once
+	thread_block(THREAD_CONTINUE_NULL);
 }
 
 void SMIMonitor::wakeUpdateThread() {
-	IOLockWakeup(mainLock, &storedSmcUpdates, true);
+	thread_wakeup_prim(updateThreadEvent(), FALSE, THREAD_AWAKENED);
+}
+
+bool SMIMonitor::hasPendingSmcUpdates() {
+	IOSimpleLockLock(queueLock);
+	bool pending = storedSmcUpdates.size() != 0;
+	IOSimpleLockUnlock(queueLock);
+	return pending;
 }
 
 void SMIMonitor::handlePendingSmcUpdates()
 {
-	while (awake && storedSmcUpdates.size() != 0) {
+	while (awake) {
 		IOSimpleLockLock(queueLock);
 		if (storedSmcUpdates.size() == 0) {
 			IOSimpleLockUnlock(queueLock);
@@ -588,6 +604,8 @@ void SMIMonitor::handlePendingSmcUpdates()
 		}
 		StoredSmcUpdate update = storedSmcUpdates[0];
 		storedSmcUpdates.erase(0, false);
+		// Mark it in flight before the queue looks empty, so handlePowerOff() keeps waiting for it
+		atomic_store_explicit(&updateInProgress, true, memory_order_release);
 		IOSimpleLockUnlock(queueLock);
 
 		switch (update.key) {
@@ -601,6 +619,11 @@ void SMIMonitor::handlePendingSmcUpdates()
 				handleManualForceFanControlUpdate(update.data);
 				break;
 		}
+
+		IOLockLock(mainLock);
+		atomic_store_explicit(&updateInProgress, false, memory_order_release);
+		IOLockWakeup(mainLock, &updateInProgress, false);
+		IOLockUnlock(mainLock);
 	}
 }
 

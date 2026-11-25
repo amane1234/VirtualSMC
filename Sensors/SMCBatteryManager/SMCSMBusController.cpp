@@ -369,8 +369,17 @@ IOSMBusStatus SMCSMBusController::startRequest(IOSMBusRequest *request) {
 	}
 
 	// Complete the request asynchronously. The timer used to re-arm itself every TimerTimeoutMs
-	// forever, waking the CPU 10 times a second with an empty queue.
-	timer->setTimeoutMS(RequestCompletionDelayMs);
+	// forever, waking the CPU 10 times a second with an empty queue. Arm it once per batch:
+	// re-arming on every request would push the completion back while requests keep arriving.
+	if (!timerArmed) {
+		if (timer->setTimeoutMS(RequestCompletionDelayMs) != kIOReturnSuccess) {
+			SYSLOG("smcbus", "startRequest failed to arm the completion timer");
+			// Drop the request again so it is not left in the queue without a pending completion
+			requestQueue->removeObject(requestQueue->getCount() - 1);
+			return kIOSMBusStatusUnknownFailure;
+		}
+		timerArmed = true;
+	}
 
 	IOSimpleLockLock(BatteryManager::getShared()->stateLock);
 	BatteryManager::getShared()->lastAccess = getCurrentTimeNs();
@@ -380,6 +389,10 @@ IOSMBusStatus SMCSMBusController::startRequest(IOSMBusRequest *request) {
 }
 
 void SMCSMBusController::handleBatteryCommandsEvent() {
+	// Clear first: completing a request can start the next transaction, which queues it and must
+	// arm the timer again.
+	timerArmed = false;
+
 	// requestQueue contains objects owned by two parties:
 	// 1. requestQueue itself, as the addition of any object retains it
 	// 2. IOSMBusController, since it does not release the object after passing it

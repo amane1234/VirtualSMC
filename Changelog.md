@@ -15,7 +15,7 @@ VirtualSMC Changelog
 - SMCLightSensor keeps a reference to the ALS ACPI device it polls
 - Fixed SMCProcessor reporting an absurd power value whenever a 32-bit RAPL energy counter wrapped around
 - SMCProcessor no longer keeps polling threads for hyper-threaded logical CPUs, which only woke those CPUs every 500 ms
-- Fixed SMCDellSensors possibly blocking system sleep forever while waiting for queued fan updates
+- Fixed SMCDellSensors possibly blocking system sleep forever while waiting for queued fan updates; it now also waits (up to 3 s) for an update that was taken from the queue but not yet written
 - SMCDellSensors no longer wakes CPU 0 every 100 ms: the SMM thread sleeps until the next sensor refresh (every 3 s) and wakes at once for fan control writes
 - SMCBatteryManager no longer runs the SMBus completion timer 10 times a second with nothing queued; it is armed only while requests are queued
 - SMCBatteryManager shortens the quick-poll window after an ACPI notification from 60 s to 10 s when `_BST` reports a present rate (fewer `_STA`/`_PSR`/`_BST` evaluations, which are SMIs on Dell)

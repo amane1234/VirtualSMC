@@ -256,6 +256,21 @@ private:
 	 */
 	static constexpr uint32_t NotAwakeWaitMs {1000};
 
+	/**
+	 *  Longest wait in handlePowerOff() for queued fan updates to be applied
+	 */
+	static constexpr uint32_t PowerOffUpdateWaitMs {3000};
+
+	/**
+	 *  handlePowerOn() asked the update thread to refresh at once
+	 */
+	atomic_bool wakeRequested = false;
+
+	/**
+	 *  An SMC update was taken from the queue and is being applied (set under queueLock when taken)
+	 */
+	atomic_bool updateInProgress = false;
+
 private:
 
 	/**
@@ -306,6 +321,16 @@ private:
 	 *  Wake the update thread, for example after an SMC update was posted
 	 */
 	void wakeUpdateThread();
+
+	/**
+	 *  Check for queued SMC updates under queueLock
+	 */
+	bool hasPendingSmcUpdates();
+
+	/**
+	 *  Event the update thread waits on
+	 */
+	event_t updateThreadEvent() { return reinterpret_cast<event_t>(&storedSmcUpdates); }
 
 	/**
 	 *  SMC update handlers

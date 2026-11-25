@@ -234,19 +234,25 @@ class EXPORT SMCProcessor : public IOService {
 	_Atomic(uint64_t) lastKeyReadNs;
 
 	/**
-	 *  Lock and event used to park the per-core workers while nobody reads the sensors
-	 */
-	IOLock *workerLock {nullptr};
-
-	/**
 	 *  Workers stop reading MSRs after this long without a key read, like the energy timer
 	 */
 	static constexpr uint64_t WorkerIdleNs {MaxDeltaForRescheduleNs};
 
 	/**
-	 *  Longest wait of a parked worker; bounds a wakeup lost to a race with quickReschedule
+	 *  Longest wait of a parked worker. The wait itself cannot miss a wakeup (see parkWorker), so
+	 *  this is only a safety net.
 	 */
 	static constexpr uint32_t WorkerIdleWaitMs {30000};
+
+	/**
+	 *  Event that parked workers wait on
+	 */
+	event_t workerEvent() { return reinterpret_cast<event_t>(&lastKeyReadNs); }
+
+	/**
+	 *  Park the calling worker until a key read, stop request or WorkerIdleWaitMs
+	 */
+	void parkWorker();
 
 	/**
 	 *  Check whether the sensor keys were not read for WorkerIdleNs
@@ -259,8 +265,7 @@ class EXPORT SMCProcessor : public IOService {
 	 *  Wake parked workers, for example to let them exit
 	 */
 	void wakeWorkers() {
-		if (workerLock)
-			IOLockWakeup(workerLock, &lastKeyReadNs, false);
+		thread_wakeup_prim(workerEvent(), FALSE, THREAD_AWAKENED);
 	}
 
 	/**
@@ -277,7 +282,8 @@ class EXPORT SMCProcessor : public IOService {
 	static void staticThreadEntry(thread_call_param_t param0, thread_call_param_t param1);
 
 	/**
-	 *  Restart the RAPL energy baselines of the package that cpu leads
+	 *  Restart the RAPL energy baselines of the package that cpu leads from the values that
+	 *  updateCounters(cpu) just read. Takes counterLock, like timerCallback.
 	 */
 	void resetEnergyBaseline(uint32_t cpu);
 

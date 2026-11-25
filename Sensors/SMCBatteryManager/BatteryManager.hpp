@@ -103,6 +103,8 @@ public:
 	/**
 	 *  Number of quick polls to schedule after an ACPI notification or a wake
 	 *
+	 *  Takes stateLock, so it must not be called with stateLock held.
+	 *
 	 *  @return QuickPollCountWithRate when every battery reports a present rate, QuickPollCount otherwise
 	 */
 	uint32_t notificationQuickPollCount();

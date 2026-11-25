@@ -132,12 +132,6 @@ public:
 	 */
 	bool averageRateAvailable {false};
 
-	/**
-	 *  The last _BST reported a valid present rate. Written under the battery manager lock; a stale
-	 *  read only changes the length of one quick-poll window.
-	 */
-	bool presentRateAvailable {false};
-
 private:
 	uint32_t getNumberFromArray(OSArray *array, uint32_t index);
 

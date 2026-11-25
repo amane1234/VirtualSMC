@@ -68,6 +68,11 @@ class EXPORT SMCSMBusController : public IOSMBusController {
 	static constexpr uint32_t RequestCompletionDelayMs = 10;
 
 	/**
+	 *  The completion timer is pending. Only accessed on the controller work loop.
+	 */
+	bool timerArmed {false};
+
+	/**
 	 *  A workloop in charge of handling timer events with requests.
 	 */
 	IOWorkLoop *workLoop {nullptr};
